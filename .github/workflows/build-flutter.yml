@@ -1,0 +1,115 @@
+name: BUILD FLUTTER FAST
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        required: true
+        type: string
+      payload:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  flutter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Parse
+        id: p
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+
+          p = json.loads(os.environ["PAYLOAD"])
+
+          print("mode=" + str(p.get("mode", "zip")))
+          print("tag=" + str(p.get("tag", "")))
+          print("url=" + str(p.get("url", "")))
+          print("build_type=" + str(p.get("buildType", "release")))
+          PY
+
+      - name: Download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/download-source.sh \
+            "${{ steps.p.outputs.mode }}" \
+            "${{ steps.p.outputs.tag }}" \
+            "${{ steps.p.outputs.url }}"
+
+      - name: Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Locate
+        id: project
+        run: |
+          RESULT="$(
+            ./scripts/prepare-project.sh \
+              "$RUNNER_TEMP/project"
+          )"
+
+          DIR="${RESULT#Flutter project: }"
+
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          ./scripts/build-android.sh \
+            "${{ steps.project.outputs.dir }}" \
+            "${{ steps.p.outputs.build_type }}"
+
+      - name: APK
+        id: apk
+        run: |
+          APK="$(
+            ./scripts/find-apk.sh \
+              "${{ steps.project.outputs.dir }}"
+          )"
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-apk-${{ inputs.jobId }}
+          path: ${{ steps.apk.outputs.path }}
+          compression-level: 0
+          retention-days: 1
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/publish-apk.sh \
+            "${{ steps.apk.outputs.path }}" \
+            "${{ inputs.jobId }}"
+
+      - name: Cleanup
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/cleanup.sh \
+            "${{ steps.p.outputs.tag }}"
