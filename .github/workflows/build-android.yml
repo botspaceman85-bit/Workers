@@ -1,0 +1,108 @@
+name: DUTA Android Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        required: true
+        type: string
+      userId:
+        required: true
+        type: string
+      payload:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: duta-android-${{ inputs.jobId }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Parse payload
+        id: cfg
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,json
+          p=json.loads(os.environ['PAYLOAD'])
+          if not p.get('url'): raise SystemExit('payload.url tidak ditemukan')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('url='+p['url']+'\n')
+          PY
+
+      - name: Fast source download
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/out"
+          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 15 --max-time 600 \
+            -A 'DUTA-Android-Worker/2' -o "$RUNNER_TEMP/source.zip" '${{ steps.cfg.outputs.url }}'
+
+      - name: Safe extract + locate
+        id: project
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,zipfile
+          d=os.path.join(os.environ['RUNNER_TEMP'],'source'); root=os.path.realpath(d)
+          with zipfile.ZipFile(os.path.join(os.environ['RUNNER_TEMP'],'source.zip')) as z:
+              for i in z.infolist():
+                  o=os.path.realpath(os.path.join(d,i.filename))
+                  if not (o==root or o.startswith(root+os.sep)): raise SystemExit('unsafe zip')
+              z.extractall(d)
+          p=''
+          for base,ds,fs in os.walk(d):
+              if 'gradlew' in fs: p=base; break
+          if not p: raise SystemExit('gradlew tidak ditemukan')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('path='+p+'\n')
+          PY
+
+      - name: Java + Gradle cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.path }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --parallel --build-cache
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          apk=$(find '${{ steps.project.outputs.path }}' -type f -path '*/build/outputs/apk/*.apk' -print -quit)
+          [ -n "$apk" ] || exit 1
+          cp "$apk" "$RUNNER_TEMP/out/app-${{ inputs.jobId }}.apk"
+          sha256sum "$RUNNER_TEMP/out/app-${{ inputs.jobId }}.apk"
+
+      - name: Upload artifact uncompressed
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.jobId }}
+          path: ${{ runner.temp }}/out/app-*.apk
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="duta-build-${{ inputs.jobId }}"
+          gh release create "$tag" "$RUNNER_TEMP/out/app-${{ inputs.jobId }}.apk" \
+            --repo "$GITHUB_REPOSITORY" --title "DUTA APK ${{ inputs.jobId }}" \
+            --notes "Automated Android build ${{ inputs.jobId }}" --target "$GITHUB_SHA" || \
+          gh release upload "$tag" "$RUNNER_TEMP/out/app-${{ inputs.jobId }}.apk" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "::notice title=APK_READY::Release tag $tag"
