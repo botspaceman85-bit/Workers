@@ -1,0 +1,19 @@
+{
+  "name": "DUTA FAST WORKER",
+  "version": "2.0.0",
+  "type": "github-actions",
+  "platform": "android",
+  "build": {
+    "flutter": true,
+    "apk": true,
+    "release": true,
+    "debug": true
+  },
+  "performance": {
+    "flutter_cache": true,
+    "gradle_cache": true,
+    "artifact_compression": 0,
+    "fetch_depth": 1,
+    "parallel_workers": true
+  }
+}
