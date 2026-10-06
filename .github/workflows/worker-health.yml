@@ -1,0 +1,39 @@
+name: WORKER HEALTH
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Worker online
+        run: |
+          echo "Worker: $GITHUB_REPOSITORY"
+          echo "Runner: $RUNNER_OS"
+          echo "Status: ONLINE"
+
+      - name: Check tools
+        run: |
+          git --version
+          unzip -v | head -n 2
+          curl --version | head -n 1
+          gh --version | head -n 1
+
+      - name: Check disk
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Check CPU
+        run: |
+          nproc
+
+      - name: Health OK
+        run: |
+          echo "WORKER HEALTHY"
