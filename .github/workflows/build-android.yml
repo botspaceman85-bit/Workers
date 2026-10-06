@@ -1,0 +1,139 @@
+name: BUILD ANDROID FAST
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        required: true
+        type: string
+      payload:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ inputs.jobId }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout worker
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Parse payload
+        id: payload
+        shell: bash
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          p = json.loads(os.environ["PAYLOAD"])
+
+          print("mode=" + str(p.get("mode", "zip")))
+          print("tag=" + str(p.get("tag", "")))
+          print("url=" + str(p.get("url", "")))
+          print("build_type=" + str(p.get("buildType", "release")))
+          PY
+
+      - name: Download source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.payload.outputs.mode }}
+          TAG: ${{ steps.payload.outputs.tag }}
+          URL: ${{ steps.payload.outputs.url }}
+        run: |
+          set -euo pipefail
+          ./scripts/download-source.sh \
+            "$MODE" \
+            "$TAG" \
+            "$URL"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare project
+        id: project
+        run: |
+          set -euo pipefail
+
+          RESULT="$(
+            ./scripts/prepare-project.sh \
+              "$RUNNER_TEMP/project"
+          )"
+
+          DIR="${RESULT#Flutter project: }"
+
+          test -f "$DIR/pubspec.yaml"
+
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK
+        env:
+          BUILD_TYPE: ${{ steps.payload.outputs.build_type }}
+        run: |
+          set -euo pipefail
+
+          ./scripts/build-android.sh \
+            "${{ steps.project.outputs.dir }}" \
+            "$BUILD_TYPE"
+
+      - name: Find APK
+        id: apk
+        run: |
+          APK="$(
+            ./scripts/find-apk.sh \
+              "${{ steps.project.outputs.dir }}"
+          )"
+
+          test -s "$APK"
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.jobId }}
+          path: ${{ steps.apk.outputs.path }}
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.apk.outputs.path }}
+          JOB_ID: ${{ inputs.jobId }}
+        run: |
+          ./scripts/publish-apk.sh \
+            "$APK" \
+            "$JOB_ID"
+
+      - name: Cleanup
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.payload.outputs.tag }}
+        run: |
+          ./scripts/cleanup.sh "$TAG"
